@@ -12,14 +12,16 @@ use pnet::util;
 use std::str::FromStr;
 use std::net::{Ipv4Addr, IpAddr};
 use std::time::Duration;
+use std::io::{self, Write};
 
 // Receive timeout in seconds:
 static TIMEOUT_SECS: Duration = Duration::from_secs(5);
 
 // The lengths of the request message parts (IP / ICMP / total):
-static REQ_IP_HEADER_LEN: usize = 20;
-static REQ_ICMP_HEADER_LEN: usize = 8;
-static REQ_TOTAL_LEN: usize = REQ_IP_HEADER_LEN + REQ_ICMP_HEADER_LEN;
+const REQ_IP_HEADER_LEN: usize = 21;
+const REQ_ICMP_HEADER_LEN: usize = 8;
+const REQ_ICMP_PAYLOAD_LEN: usize = 32;
+const REQ_TOTAL_LEN: usize = REQ_IP_HEADER_LEN + REQ_ICMP_HEADER_LEN + REQ_ICMP_PAYLOAD_LEN;
 
 fn create_icmp_packet<'a>(destination: Ipv4Addr, ttl: u8, buffer_ip: &'a mut [u8], buffer_icmp: &'a mut [u8]) -> Result<MutableIpv4Packet<'a>,String>{
     let mut ipv4_packet = match MutableIpv4Packet::new(buffer_ip){
@@ -42,6 +44,7 @@ fn create_icmp_packet<'a>(destination: Ipv4Addr, ttl: u8, buffer_ip: &'a mut [u8
     icmp_packet.set_icmp_type(IcmpTypes::EchoRequest);
     let checksum = util::checksum(&icmp_packet.packet_mut(), 2);
     icmp_packet.set_checksum(checksum);
+
     ipv4_packet.set_payload(icmp_packet.packet_mut());
 
     return Ok(ipv4_packet)
@@ -60,16 +63,18 @@ fn main() -> Result<(), String> {
 
     let (mut tx, mut rx) = match transport_channel(1024, Layer3(IpNextHeaderProtocols::Icmp)){
         Ok((tx, rx)) => (tx, rx),
-        Err(e) => return Err(format!("Could not open channel: {}", e)),
+        Err(e) => return Err(format!("Could not open channel: {}\nTry run as root.", e)),
     };
     
     let mut results = vec![];
     let mut rx = icmp_packet_iter(&mut rx);
     let mut ttl = 1;
     let mut prev_addr: Option<IpAddr> = None;
+
+    print!("Tracing route ");
     loop {
-        let mut buffer_ip = [0 as u8; 40];
-        let mut buffer_icmp = [0 as u8; 40];
+        let mut buffer_ip = [0 as u8; REQ_TOTAL_LEN];
+        let mut buffer_icmp = [0 as u8; REQ_ICMP_HEADER_LEN + REQ_ICMP_PAYLOAD_LEN];
 
         let icmp_packet = create_icmp_packet(ip_addr, ttl, &mut buffer_ip, &mut buffer_icmp)?;
         let _ = match tx.send_to(icmp_packet, std::net::IpAddr::V4(ip_addr)){
@@ -80,19 +85,24 @@ fn main() -> Result<(), String> {
         if let Ok(result) = rx.next_with_timeout(TIMEOUT_SECS) {
             let (_, ip_addr) = match result{
                 Some(tup) => tup,
-                None => return Err(format!("timeout receiving icmp packet")),
+                None =>  {
+                    println!("Timeout receiving icmp packet");
+                    break;
+                },
             };
             if Some(ip_addr) == prev_addr{
                 break;
             }
             prev_addr = Some(ip_addr);
+            print!(".");
+            io::stdout().flush().unwrap();            
             results.push((ttl, ip_addr.to_string()));
         }
         ttl += 1;
     }
 
     results.sort_by(|a,b| a.0.cmp(&b.0));
-
+    println!("");
     for (ttl, ip_addr) in results {
         println!("TTL: {} - {}", ttl, ip_addr.to_string());
     }
