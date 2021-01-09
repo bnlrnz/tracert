@@ -63,7 +63,7 @@ fn main() -> Result<(), String> {
 
     let (mut tx, mut rx) = match transport_channel(1024, Layer3(IpNextHeaderProtocols::Icmp)){
         Ok((tx, rx)) => (tx, rx),
-        Err(e) => return Err(format!("Could not open channel: {}\nTry run as root.", e)),
+        Err(e) => return Err(format!("Could not open channel: {} - Try run as root.", e)),
     };
     
     let mut results = vec![];
