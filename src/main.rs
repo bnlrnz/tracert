@@ -4,12 +4,10 @@ use pnet::transport::TransportChannelType::Layer3;
 use pnet::packet::ip::IpNextHeaderProtocols;
 use pnet::transport::{transport_channel, icmp_packet_iter};
 use pnet::packet::ipv4::MutableIpv4Packet;
+use pnet::packet::icmp::{IcmpTypes, IcmpCode};
 use pnet::packet::icmp::MutableIcmpPacket;
 use pnet::packet::MutablePacket;
 use pnet::util;
-
-#[cfg(debug_assertions)]
-use pnet::packet::icmp::{IcmpTypes, IcmpCode};
 
 use std::str::FromStr;
 use std::net::{Ipv4Addr, IpAddr};
@@ -74,6 +72,8 @@ fn main() -> Result<(), String> {
 
     println!("Tracing route ");
     for ttl in 1..=64 {
+        print!(".");
+
         let mut buffer_ip = [0 as u8; REQ_TOTAL_LEN];
         let mut buffer_icmp = [0 as u8; REQ_ICMP_HEADER_LEN];
 
@@ -92,12 +92,10 @@ fn main() -> Result<(), String> {
                 },
             };
 
-            #[cfg(debug_assertions)]{
-                let icmp_type = resp.get_icmp_type();
-                let icmp_code = resp.get_icmp_code();
-                
-                println!("Icmp Type: {:?}, Icmp Code: {:?}", icmp_type, icmp_code);
-            }
+            let icmp_type = resp.get_icmp_type();
+            let icmp_code = resp.get_icmp_code();
+            
+            println!("Icmp Type: {:?}, Icmp Code: {:?}", icmp_type, icmp_code);
 
             if Some(ip_addr) == prev_addr{
                 results.push((ttl, format!("Reached destination: {}", destination.to_string())));
@@ -105,7 +103,6 @@ fn main() -> Result<(), String> {
             }
 
             prev_addr = Some(ip_addr);
-            print!(".");
             io::stdout().flush().unwrap();            
             results.push((ttl, ip_addr.to_string()));
         }
