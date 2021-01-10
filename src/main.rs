@@ -70,7 +70,7 @@ fn main() -> Result<(), String> {
     let mut rx = icmp_packet_iter(&mut rx);
     let mut prev_addr: Option<IpAddr> = None;
 
-    println!("Tracing route ");
+    println!("Tracing route to {}", destination);
     for ttl in 1..=64 {
         print!(".");
 
