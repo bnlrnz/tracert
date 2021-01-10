@@ -3,7 +3,6 @@ use pnet::packet::{ip::IpNextHeaderProtocols, ipv4::MutableIpv4Packet, MutablePa
 use pnet::transport::{icmp_packet_iter, transport_channel, TransportChannelType::Layer3};
 use pnet::util;
 
-use std::io::{self, Write};
 use std::net::{IpAddr, Ipv4Addr};
 use std::str::FromStr;
 use std::time::Duration;
@@ -57,12 +56,11 @@ fn main() -> Result<(), String> {
     let (mut tx, mut rx) = transport_channel(1024, Layer3(IpNextHeaderProtocols::Icmp))
         .map_err(|e| format!("Could not open channel: {} - Try run as root.", e))?;
 
-    let mut results = vec![];
     let mut rx = icmp_packet_iter(&mut rx);
+    let mut curr_ip_addr = None;
     let mut ttl = 1;
 
-    print!("Tracing route to {} ...", ip_addr);
-    let mut curr_ip_addr = None;
+    println!("Tracing route to {} ...", ip_addr);
 
     while curr_ip_addr != Some(IpAddr::V4(ip_addr)) {
         let mut buffer_ip = [0 as u8; REQ_TOTAL_LEN];
@@ -76,18 +74,10 @@ fn main() -> Result<(), String> {
             .map_err(|e| format!("Coult not receive ICMP resp: {}", e))?
             .map(|(_, ip)| ip);
 
-        results.push(curr_ip_addr);
-
-        print!(".");
-        io::stdout().flush().unwrap();
+        let curr_output = curr_ip_addr.map_or_else(|| "<timeout>".to_string(), |ip| ip.to_string());
+        println!("TTL: {} - {}", ttl, curr_output);
 
         ttl += 1;
-    }
-
-    println!("");
-    for (ttl, opt_ip) in results.iter().enumerate() {
-        let ip = opt_ip.map_or_else(|| "<timeout>".to_string(), |ip| ip.to_string());
-        println!("TTL: {} - {}", ttl + 1, ip);
     }
 
     Ok(())
