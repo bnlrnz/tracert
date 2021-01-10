@@ -1,42 +1,28 @@
-extern crate pnet;
-
-use pnet::transport::TransportChannelType::Layer3;
-use pnet::packet::ip::IpNextHeaderProtocols;
-use pnet::transport::{transport_channel, icmp_packet_iter};
-use pnet::packet::ipv4::MutableIpv4Packet;
-use pnet::packet::icmp::{IcmpTypes, IcmpCode};
-use pnet::packet::icmp::MutableIcmpPacket;
-use pnet::packet::MutablePacket;
+use pnet::packet::icmp::{echo_request::MutableEchoRequestPacket, IcmpTypes};
+use pnet::packet::{ip::IpNextHeaderProtocols, ipv4::MutableIpv4Packet, MutablePacket};
+use pnet::transport::{icmp_packet_iter, transport_channel, TransportChannelType::Layer3};
 use pnet::util;
 
+use std::net::{IpAddr, Ipv4Addr};
 use std::str::FromStr;
-use std::net::{Ipv4Addr, IpAddr};
 use std::time::Duration;
-use std::io::{self, Write};
 
 // Receive timeout in seconds:
 static TIMEOUT_SECS: Duration = Duration::from_secs(5);
 
 // The lengths of the request message parts (IP / ICMP / total):
-const REQ_IP_HEADER_LEN: usize = 21;
+const REQ_IP_HEADER_LEN: usize = 5;
 const REQ_ICMP_HEADER_LEN: usize = 8;
-const REQ_TOTAL_LEN: usize = REQ_IP_HEADER_LEN + REQ_ICMP_HEADER_LEN;
+const REQ_ICMP_PAYLOAD_LEN: usize = 32;
+const REQ_TOTAL_LEN: usize = (REQ_IP_HEADER_LEN * 4) + REQ_ICMP_HEADER_LEN + REQ_ICMP_PAYLOAD_LEN;
 
-fn create_icmp_packet<'a>(destination: Ipv4Addr, ttl: u8, buffer_ip: &'a mut [u8], buffer_icmp: &'a mut [u8]) -> Result<MutableIpv4Packet<'a>,String>{
-    let mut icmp_packet = match MutableIcmpPacket::new(buffer_icmp){
-        Some(packet) => packet,
-        None => return Err("Could not create MutableIcmpPacket (icmp)".to_string()),
-    };
-
-    icmp_packet.set_icmp_type(IcmpTypes::EchoRequest);
-    icmp_packet.set_icmp_code(IcmpCode(0));
-    let checksum = util::checksum(&icmp_packet.packet_mut(), 2);
-    icmp_packet.set_checksum(checksum);
-    
-    let mut ipv4_packet = match MutableIpv4Packet::new(buffer_ip){
-        Some(packet) => packet,
-        None => return Err("Could not create MutableIpv4Packet".to_string()),
-    };
+fn create_icmp_packet(
+    destination: Ipv4Addr,
+    ttl: u8,
+    buffer_ip: &mut [u8],
+) -> Result<MutableIpv4Packet, String> {
+    let mut ipv4_packet = MutableIpv4Packet::new(buffer_ip)
+        .ok_or_else(|| "Could not create MutableIpv4Packet".to_string())?;
 
     ipv4_packet.set_version(4);
     ipv4_packet.set_header_length(REQ_IP_HEADER_LEN as u8);
@@ -45,9 +31,19 @@ fn create_icmp_packet<'a>(destination: Ipv4Addr, ttl: u8, buffer_ip: &'a mut [u8
     ipv4_packet.set_next_level_protocol(IpNextHeaderProtocols::Icmp);
     ipv4_packet.set_destination(destination);
 
+    let mut buffer_icmp = [0 as u8; REQ_ICMP_HEADER_LEN + REQ_ICMP_PAYLOAD_LEN];
+    let mut icmp_packet = MutableEchoRequestPacket::new(&mut buffer_icmp)
+        .ok_or_else(|| "Could not create MutableEchoRequestPacket (icmp)".to_string())?;
+
+    icmp_packet.set_icmp_type(IcmpTypes::EchoRequest);
+    icmp_packet.set_payload(&[42; REQ_ICMP_PAYLOAD_LEN]);
+
+    let checksum = util::checksum(&icmp_packet.packet_mut(), 2);
+    icmp_packet.set_checksum(checksum);
+
     ipv4_packet.set_payload(icmp_packet.packet_mut());
 
-    return Ok(ipv4_packet)
+    Ok(ipv4_packet)
 }
 
 fn main() -> Result<(), String> {
@@ -56,62 +52,32 @@ fn main() -> Result<(), String> {
         return Err("Please provide IPv4 address as argument.".to_string());
     }
 
-    let destination = match Ipv4Addr::from_str(&args[1]){
-        Ok(destination) => destination,
-        Err(e) => return Err(format!("{}", e)),
-    };
+    let ip_addr = Ipv4Addr::from_str(&args[1]).map_err(|e| format!("{}", e))?;
+    let (mut tx, mut rx) = transport_channel(1024, Layer3(IpNextHeaderProtocols::Icmp))
+        .map_err(|e| format!("Could not open channel: {} - Try run as root.", e))?;
 
-    let (mut tx, mut rx) = match transport_channel(4096, Layer3(IpNextHeaderProtocols::Icmp)){
-        Ok((tx, rx)) => (tx, rx),
-        Err(e) => return Err(format!("Could not open channel: {} - Try run as root.", e)),
-    };
-    
-    let mut results = vec![];
     let mut rx = icmp_packet_iter(&mut rx);
-    let mut prev_addr: Option<IpAddr> = None;
+    let mut curr_ip_addr = None;
+    let mut ttl = 1;
 
-    println!("Tracing route to {}", destination);
-    for ttl in 1..=64 {
-        print!(".");
+    println!("Tracing route to {} ...", ip_addr);
 
+    while curr_ip_addr != Some(IpAddr::V4(ip_addr)) {
         let mut buffer_ip = [0 as u8; REQ_TOTAL_LEN];
-        let mut buffer_icmp = [0 as u8; REQ_ICMP_HEADER_LEN];
+        let icmp_packet = create_icmp_packet(ip_addr, ttl, &mut buffer_ip)?;
 
-        let icmp_packet = create_icmp_packet(destination, ttl, &mut buffer_ip, &mut buffer_icmp)?;
-        let _ = match tx.send_to(icmp_packet, std::net::IpAddr::V4(destination)){
-            Ok(_) => {},
-            Err(e) => return Err(format!("Could not send ICMP req: {}", e)),
-        };
+        tx.send_to(icmp_packet, std::net::IpAddr::V4(ip_addr))
+            .map_err(|e| format!("Could not send ICMP req: {}", e))?;
 
-        if let Ok(result) = rx.next_with_timeout(TIMEOUT_SECS) {
-            let (resp, ip_addr) = match result{
-                Some(tup) => tup,
-                None =>  {
-                    println!("Timeout receiving icmp packet");
-                    break;
-                },
-            };
+        curr_ip_addr = rx
+            .next_with_timeout(TIMEOUT_SECS)
+            .map_err(|e| format!("Coult not receive ICMP resp: {}", e))?
+            .map(|(_, ip)| ip);
 
-            let icmp_type = resp.get_icmp_type();
-            let icmp_code = resp.get_icmp_code();
-            
-            println!("Icmp Type: {:?}, Icmp Code: {:?}", icmp_type, icmp_code);
+        let curr_output = curr_ip_addr.map_or_else(|| "<timeout>".to_string(), |ip| ip.to_string());
+        println!("TTL: {} - {}", ttl, curr_output);
 
-            if Some(ip_addr) == prev_addr{
-                results.push((ttl, format!("Reached destination: {}", destination.to_string())));
-                break;
-            }
-
-            prev_addr = Some(ip_addr);
-            io::stdout().flush().unwrap();            
-            results.push((ttl, ip_addr.to_string()));
-        }
-    }
-
-    results.sort_by(|a,b| a.0.cmp(&b.0));
-    println!("");
-    for (ttl, ip_addr) in results {
-        println!("TTL: {} - {}", ttl, ip_addr.to_string());
+        ttl += 1;
     }
 
     Ok(())
